@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <title>ChatGPT Image Auto - CTE v1</title>
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="brand-dot"></span>
+      <h1>ChatGPT Image Auto - CTE v1</h1>
+    </div>
+    <nav>
+      <button class="tab-btn active" data-tab="queue">Queue</button>
+      <button class="tab-btn" data-tab="library">Library</button>
+      <button class="tab-btn" data-tab="settings">Settings</button>
+    </nav>
+  </header>
+
+  <section id="tab-queue" class="tab-panel active">
+    <div class="card">
+      <div class="field-label">Tema / Folder</div>
+      <input type="text" id="theme-input" placeholder="misal: Kucing, Landscape, Produk A" />
+      <span class="ref-hint">Hasil generate disimpan ke folder ini di dalam Downloads</span>
+    </div>
+
+    <div class="card">
+      <textarea id="prompt-input" rows="5" placeholder="Satu prompt per baris...&#10;contoh:&#10;kucing oranye duduk di jendela, gaya cat air&#10;pemandangan gunung saat matahari terbenam"></textarea>
+
+      <div class="row">
+        <label class="file-btn">
+          Import .txt
+          <input type="file" id="file-import" accept=".txt" hidden />
+        </label>
+        <button id="add-prompts-btn" class="primary">+ Tambah ke antrian</button>
+        <button id="clear-prompt-btn">Clear prompt</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="field-label">Reference image (master) — maks 4</div>
+      <div id="master-ref-grid" class="ref-grid"></div>
+      <input type="file" id="master-ref-input" accept="image/*" multiple hidden />
+      <span class="ref-hint">Dipakai sebagai rujukan untuk semua prompt di antrian ini</span>
+    </div>
+
+    <div class="card">
+      <div class="field-label">Aspect ratio</div>
+      <div id="aspect-buttons" class="segmented">
+        <button class="aspect-btn" data-ratio="">Default</button>
+        <button class="aspect-btn" data-ratio="1:1">1:1</button>
+        <button class="aspect-btn" data-ratio="16:9">16:9</button>
+        <button class="aspect-btn" data-ratio="9:16">9:16</button>
+      </div>
+    </div>
+
+    <div class="row controls">
+      <button id="start-btn" class="primary">▶ Mulai</button>
+      <button id="stop-btn">⏸ Berhenti</button>
+      <button id="retry-all-btn">↻ Retry gagal</button>
+      <button id="clear-btn" class="danger">Bersihkan</button>
+    </div>
+
+    <div class="progress-wrap">
+      <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
+      <div id="progress-label" class="progress-label">Tidak ada antrian</div>
+    </div>
+
+    <div class="queue-header">
+      <span>Antrian</span>
+      <span id="queue-count" class="count-badge">0</span>
+    </div>
+    <ul id="queue-list"></ul>
+    <p id="queue-empty" class="empty-hint">Belum ada prompt di antrian.</p>
+  </section>
+
+  <section id="tab-library" class="tab-panel">
+    <ul id="library-list"></ul>
+    <p id="library-empty" class="empty-hint">Belum ada gambar yang di-generate.</p>
+  </section>
+
+  <section id="tab-settings" class="tab-panel">
+    <div class="card">
+      <label class="toggle-row">
+        <input type="checkbox" id="auto-download-toggle" checked />
+        <span>Auto Save hasil generate</span>
+      </label>
+      <span class="ref-hint">Kalau dimatikan, gambar tetap tercatat di tab Library tapi tidak otomatis tersimpan ke Downloads</span>
+    </div>
+
+    <div class="card">
+      <div class="field-label">Folder utama di Downloads</div>
+      <input type="text" id="base-folder-input" placeholder="ChatGPT Image Auto" />
+      <span class="ref-hint">Semua hasil disimpan di Downloads/&lt;folder ini&gt;/&lt;tema&gt;/</span>
+    </div>
+  </section>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>
