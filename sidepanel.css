@@ -168,6 +168,17 @@ button.danger { color: var(--danger); }
   font-size: 12px;
 }
 
+.rate-limit-banner {
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  border: 1px solid #f0d060;
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+.rate-limit-banner.hidden { display: none; }
+
 .controls { margin-bottom: 14px; }
 .controls button { flex: 1; white-space: nowrap; }
 

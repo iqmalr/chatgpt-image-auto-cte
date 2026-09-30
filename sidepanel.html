@@ -39,10 +39,23 @@
     </div>
 
     <div class="card">
-      <div class="field-label">Reference image (master) — maks 4</div>
-      <div id="master-ref-grid" class="ref-grid"></div>
-      <input type="file" id="master-ref-input" accept="image/*" multiple hidden />
-      <span class="ref-hint">Dipakai sebagai rujukan untuk semua prompt di antrian ini</span>
+      <div class="field-label">Negative Prompt</div>
+      <textarea id="negative-prompt-input" rows="2" placeholder="misal: watermark, text, border, blur, deformed hands"></textarea>
+      <span class="ref-hint">Untuk elemen visual yang tidak diinginkan. Konten sensitif sudah difilter otomatis oleh ChatGPT.</span>
+    </div>
+
+    <div class="card">
+      <div class="field-label">Referensi Karakter — maks 2</div>
+      <div id="char-ref-grid" class="ref-grid"></div>
+      <input type="file" id="char-ref-input" accept="image/*" multiple hidden />
+      <span class="ref-hint">Penampilan karakter yang harus konsisten di setiap hasil</span>
+    </div>
+
+    <div class="card">
+      <div class="field-label">Referensi Style — maks 2</div>
+      <div id="style-ref-grid" class="ref-grid"></div>
+      <input type="file" id="style-ref-input" accept="image/*" multiple hidden />
+      <span class="ref-hint">Gaya visual / art style yang diterapkan ke semua hasil</span>
     </div>
 
     <div class="card">
@@ -50,9 +63,14 @@
       <div id="aspect-buttons" class="segmented">
         <button class="aspect-btn" data-ratio="">Default</button>
         <button class="aspect-btn" data-ratio="1:1">1:1</button>
+        <button class="aspect-btn" data-ratio="4:3">4:3</button>
         <button class="aspect-btn" data-ratio="16:9">16:9</button>
         <button class="aspect-btn" data-ratio="9:16">9:16</button>
       </div>
+    </div>
+
+    <div id="rate-limit-banner" class="rate-limit-banner hidden">
+      ⏳ ChatGPT limit — lanjut otomatis dalam <strong id="rate-limit-countdown"></strong>
     </div>
 
     <div class="row controls">

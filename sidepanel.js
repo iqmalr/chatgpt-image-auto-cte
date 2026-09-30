@@ -16,12 +16,41 @@ const libraryEmpty = document.getElementById("library-empty");
 const aspectButtons = document.querySelectorAll(".aspect-btn");
 const tabButtons = document.querySelectorAll(".tab-btn");
 const tabPanels = document.querySelectorAll(".tab-panel");
-const masterRefGrid = document.getElementById("master-ref-grid");
-const masterRefInput = document.getElementById("master-ref-input");
-const MAX_REF_IMAGES = 4;
+const charRefGrid = document.getElementById("char-ref-grid");
+const charRefInput = document.getElementById("char-ref-input");
+const styleRefGrid = document.getElementById("style-ref-grid");
+const styleRefInput = document.getElementById("style-ref-input");
+const MAX_REF_IMAGES = 2;
 const themeInput = document.getElementById("theme-input");
+const negativePromptInput = document.getElementById("negative-prompt-input");
 const autoDownloadToggle = document.getElementById("auto-download-toggle");
 const baseFolderInput = document.getElementById("base-folder-input");
+const rateLimitBanner = document.getElementById("rate-limit-banner");
+const rateLimitCountdown = document.getElementById("rate-limit-countdown");
+
+let rateLimitTimer = null;
+function updateRateLimitBanner(retryAt) {
+  if (rateLimitTimer) { clearInterval(rateLimitTimer); rateLimitTimer = null; }
+  if (!retryAt || retryAt <= Date.now()) {
+    rateLimitBanner.classList.add("hidden");
+    return;
+  }
+  rateLimitBanner.classList.remove("hidden");
+  const tick = () => {
+    const ms = retryAt - Date.now();
+    if (ms <= 0) {
+      rateLimitBanner.classList.add("hidden");
+      clearInterval(rateLimitTimer);
+      rateLimitTimer = null;
+      return;
+    }
+    const m = Math.floor(ms / 60000);
+    const s = Math.floor((ms % 60000) / 1000);
+    rateLimitCountdown.textContent = m > 0 ? `${m} menit ${s} detik` : `${s} detik`;
+  };
+  tick();
+  rateLimitTimer = setInterval(tick, 1000);
+}
 
 function send(message) {
   return chrome.runtime.sendMessage(message);
@@ -65,6 +94,9 @@ function debounce(fn, delay = 400) {
 const debouncedSetTheme = debounce((theme) => send({ type: "SET_THEME", theme }));
 themeInput.addEventListener("input", () => debouncedSetTheme(themeInput.value));
 
+const debouncedSetNegativePrompt = debounce((negativePrompt) => send({ type: "SET_NEGATIVE_PROMPT", negativePrompt }));
+negativePromptInput.addEventListener("input", () => debouncedSetNegativePrompt(negativePromptInput.value));
+
 const debouncedSetBaseFolder = debounce((baseFolder) => send({ type: "SET_BASE_FOLDER", baseFolder }));
 baseFolderInput.addEventListener("input", () => debouncedSetBaseFolder(baseFolderInput.value));
 
@@ -72,13 +104,22 @@ autoDownloadToggle.addEventListener("change", () => {
   send({ type: "SET_AUTO_DOWNLOAD", enabled: autoDownloadToggle.checked });
 });
 
-masterRefInput.addEventListener("change", async () => {
-  const files = [...masterRefInput.files].slice(0, MAX_REF_IMAGES);
+charRefInput.addEventListener("change", async () => {
+  const files = [...charRefInput.files].slice(0, MAX_REF_IMAGES);
   for (const file of files) {
     const dataUrl = await fileToDataUrl(file);
-    await send({ type: "ADD_MASTER_REF_IMAGE", dataUrl });
+    await send({ type: "ADD_CHAR_REF_IMAGE", dataUrl });
   }
-  masterRefInput.value = "";
+  charRefInput.value = "";
+});
+
+styleRefInput.addEventListener("change", async () => {
+  const files = [...styleRefInput.files].slice(0, MAX_REF_IMAGES);
+  for (const file of files) {
+    const dataUrl = await fileToDataUrl(file);
+    await send({ type: "ADD_STYLE_REF_IMAGE", dataUrl });
+  }
+  styleRefInput.value = "";
 });
 
 addPromptsBtn.addEventListener("click", async () => {
@@ -121,6 +162,7 @@ function renderQueue(state) {
   queueCount.textContent = state.items.length;
   queueEmpty.classList.toggle("visible", state.items.length === 0);
   renderProgress(state.items);
+  updateRateLimitBanner(state.rateLimitRetryAt || null);
 
   for (const item of state.items) {
     const li = document.createElement("li");
@@ -174,7 +216,8 @@ function renderQueue(state) {
     b.classList.toggle("active", (b.dataset.ratio || null) === (state.aspectRatio || null));
   });
 
-  renderMasterRef(state.masterRefImages || []);
+  renderRefGrid(charRefGrid, charRefInput, state.charRefImages || [], "CHAR");
+  renderRefGrid(styleRefGrid, styleRefInput, state.styleRefImages || [], "STYLE");
 }
 
 function renderProgress(items) {
@@ -192,8 +235,9 @@ function renderProgress(items) {
     : "Tidak ada antrian";
 }
 
-function renderMasterRef(images) {
-  masterRefGrid.innerHTML = "";
+function renderRefGrid(grid, input, images, type) {
+  const removeMsg = type === "CHAR" ? "REMOVE_CHAR_REF_IMAGE" : "REMOVE_STYLE_REF_IMAGE";
+  grid.innerHTML = "";
 
   images.forEach((dataUrl, index) => {
     const slot = document.createElement("div");
@@ -207,10 +251,10 @@ function renderMasterRef(images) {
     removeBtn.className = "ref-remove";
     removeBtn.textContent = "✕";
     removeBtn.title = "Hapus reference ini";
-    removeBtn.addEventListener("click", () => send({ type: "REMOVE_MASTER_REF_IMAGE", index }));
+    removeBtn.addEventListener("click", () => send({ type: removeMsg, index }));
     slot.appendChild(removeBtn);
 
-    masterRefGrid.appendChild(slot);
+    grid.appendChild(slot);
   });
 
   if (images.length < MAX_REF_IMAGES) {
@@ -218,8 +262,8 @@ function renderMasterRef(images) {
     addSlot.className = "ref-slot-add";
     addSlot.textContent = "+";
     addSlot.title = "Tambah reference image";
-    addSlot.addEventListener("click", () => masterRefInput.click());
-    masterRefGrid.appendChild(addSlot);
+    addSlot.addEventListener("click", () => input.click());
+    grid.appendChild(addSlot);
   }
 }
 
@@ -265,6 +309,7 @@ chrome.runtime.onMessage.addListener((msg) => {
 (async () => {
   const { state } = await send({ type: "GET_STATE" });
   themeInput.value = state.theme || "";
+  negativePromptInput.value = state.negativePrompt || "";
   autoDownloadToggle.checked = state.autoDownload !== false;
   baseFolderInput.value = state.baseFolder || "ChatGPT Image Auto";
   renderQueue(state);

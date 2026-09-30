@@ -104,15 +104,23 @@ if (!window.__chatgptImageAutoLoaded) {
     }
   }
 
-  async function submitPrompt(promptText, aspectRatio, hasReferenceImages) {
+  async function submitPrompt(promptText, aspectRatio, charCount, styleCount, negativePrompt) {
     const composer = await waitFor(() => queryFirst(SELECTORS.composer), { timeout: 15000 });
     let finalText = promptText;
-    if (hasReferenceImages) {
+    if (charCount > 0 && styleCount > 0) {
       finalText =
-        `Use the attached reference image(s) as the visual reference (style, character, subject) ` +
-        `for this image: ${finalText}`;
+        `Character reference: first ${charCount} attached image(s) — maintain exact character appearance. ` +
+        `Style reference: next ${styleCount} attached image(s) — apply this visual style. ` +
+        `Apply both references to this image: ${finalText}`;
+    } else if (charCount > 0) {
+      finalText =
+        `Use the attached image(s) as character reference (maintain exact character appearance): ${finalText}`;
+    } else if (styleCount > 0) {
+      finalText =
+        `Use the attached image(s) as style reference (apply this visual style): ${finalText}`;
     }
     if (aspectRatio) finalText += `\n\nAspect ratio: ${aspectRatio}.`;
+    if (negativePrompt) finalText += `\n\nDo not include: ${negativePrompt}.`;
     setComposerText(composer, finalText);
     await sleep(200);
 
@@ -121,6 +129,39 @@ if (!window.__chatgptImageAutoLoaded) {
       throw new Error("Send button is disabled — composer text may not have registered");
     }
     sendBtn.click();
+  }
+
+  const REFUSAL_PATTERNS = [
+    /can.{0,5}t (create|generate|make|produce).{0,40}image/i,
+    /unable to (create|generate|make|produce).{0,40}image/i,
+    /not able to (create|generate|make|produce)/i,
+    /won.{0,3}t (be able to )?(create|generate|make|produce)/i,
+    /violates? (our |the )?(content|usage|community) (policy|guidelines|terms)/i,
+    /against (our |the )?(content|usage|community) (policy|guidelines|terms)/i,
+    /i (can.{0,5}t|won.{0,3}t|am unable|am not able).{0,30}(help|assist) with that/i,
+    /this (request|prompt|content).{0,30}(violates?|against|not allowed|inappropriate)/i,
+  ];
+
+  const RATE_LIMIT_PATTERNS = [
+    /image.{0,30}limit/i,
+    /limit.{0,30}image/i,
+    /rate.{0,5}limit/i,
+    /try again in \d+/i,
+    /come back in \d+/i,
+    /you.{0,20}run out/i,
+    /you.{0,20}reached.{0,20}limit/i,
+    /generation.{0,20}limit/i,
+    /can.{0,5}t generate.{0,20}image/i,
+  ];
+
+  function parseWaitMs(text) {
+    const t = text.toLowerCase();
+    const hourMatch = t.match(/(\d+)\s*hour/);
+    const minMatch = t.match(/(\d+)\s*min/);
+    let ms = 0;
+    if (hourMatch) ms += parseInt(hourMatch[1]) * 3600000;
+    if (minMatch) ms += parseInt(minMatch[1]) * 60000;
+    return ms || 3600000;
   }
 
   // Fully-loaded, reasonably-large <img> elements anywhere on the page. This
@@ -136,6 +177,11 @@ if (!window.__chatgptImageAutoLoaded) {
   }
 
   async function waitForImageResult({ timeout = 180000, stableMs = 1500, preBaselineWait = 0 } = {}) {
+    // Snapshot assistant message count NOW (before reference thumbnails load)
+    // so we can later identify the response to THIS prompt specifically.
+    const assistantMsgSelector = '[data-message-author-role="assistant"]';
+    const baselineAssistantMsgs = document.querySelectorAll(assistantMsgSelector).length;
+
     // If reference images were attached, their thumbnails appear in the chat
     // shortly after submission. Wait for them to fully load before taking the
     // baseline so they are not mistaken for the generated result.
@@ -169,6 +215,29 @@ if (!window.__chatgptImageAutoLoaded) {
           }
         } else {
           candidate = null;
+          // After 8 s with no image, check if ChatGPT replied with a rate-limit
+          // message instead of generating (only look at the NEW assistant turn).
+          if (Date.now() - start > 8000) {
+            const msgs = document.querySelectorAll(assistantMsgSelector);
+            if (msgs.length > baselineAssistantMsgs) {
+              // Only check the opening ~500 chars to avoid false positives further down
+              const latestText = (msgs[msgs.length - 1].innerText || "").slice(0, 500);
+              if (RATE_LIMIT_PATTERNS.some((p) => p.test(latestText))) {
+                const waitMs = parseWaitMs(latestText);
+                const err = new Error(`Rate limit: retry after ${Math.round(waitMs / 60000)} min`);
+                err.isRateLimit = true;
+                err.waitMs = waitMs;
+                finish(() => reject(err));
+                return;
+              }
+              if (REFUSAL_PATTERNS.some((p) => p.test(latestText))) {
+                const err = new Error("Ditolak GPT: konten tidak diizinkan");
+                err.isRefusal = true;
+                finish(() => reject(err));
+                return;
+              }
+            }
+          }
         }
 
         if (Date.now() - start > timeout) {
@@ -190,7 +259,14 @@ if (!window.__chatgptImageAutoLoaded) {
 
   console.log("[ChatGPT Image Auto] content script loaded on", location.href);
 
+  let currentAbort = null;
+
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg.type === "ABORT_CURRENT") {
+      if (currentAbort) currentAbort();
+      sendResponse({ ok: true });
+      return false;
+    }
     if (msg.type !== "PROCESS_PROMPT") return false;
 
     console.log("[ChatGPT Image Auto] received PROCESS_PROMPT:", msg.prompt);
@@ -203,25 +279,37 @@ if (!window.__chatgptImageAutoLoaded) {
     sendResponse({ ok: true, started: true });
 
     (async () => {
+      let abortReject;
+      const abortPromise = new Promise((_, reject) => { abortReject = reject; });
+      currentAbort = () => abortReject(Object.assign(new Error("Aborted"), { isAborted: true }));
+
       try {
-        const hasRefImages = !!(msg.refImageDataUrls && msg.refImageDataUrls.length);
-        let refImagesAttached = false;
-        if (hasRefImages) {
-          console.log("[ChatGPT Image Auto] attaching", msg.refImageDataUrls.length, "reference image(s)...");
-          const attached = await Promise.race([
-            attachReferenceImages(msg.refImageDataUrls),
-            sleep(15000).then(() => "timeout"),
-          ]);
-          console.log("[ChatGPT Image Auto] reference image attach result:", attached);
-          refImagesAttached = attached === true;
-          // give ChatGPT's uploader a moment to finish registering the
-          // attachment(s) before we start typing the prompt text
-          await sleep(800);
-        }
-        console.log("[ChatGPT Image Auto] submitting prompt...");
-        await submitPrompt(msg.prompt, msg.aspectRatio, refImagesAttached);
-        console.log("[ChatGPT Image Auto] prompt submitted, waiting for image...");
-        const result = await waitForImageResult({ preBaselineWait: refImagesAttached ? 3000 : 0 });
+        const work = async () => {
+          const charUrls = msg.charRefDataUrls || [];
+          const styleUrls = msg.styleRefDataUrls || [];
+          const allRefUrls = [...charUrls, ...styleUrls];
+          let charAttached = 0;
+          let styleAttached = 0;
+          if (allRefUrls.length > 0) {
+            console.log("[ChatGPT Image Auto] attaching", allRefUrls.length, "reference image(s)...");
+            const attached = await Promise.race([
+              attachReferenceImages(allRefUrls),
+              sleep(15000).then(() => "timeout"),
+            ]);
+            console.log("[ChatGPT Image Auto] reference image attach result:", attached);
+            if (attached === true) {
+              charAttached = charUrls.length;
+              styleAttached = styleUrls.length;
+            }
+            await sleep(800);
+          }
+          console.log("[ChatGPT Image Auto] submitting prompt...");
+          await submitPrompt(msg.prompt, msg.aspectRatio, charAttached, styleAttached, msg.negativePrompt || "");
+          console.log("[ChatGPT Image Auto] prompt submitted, waiting for image...");
+          return await waitForImageResult({ preBaselineWait: (charAttached + styleAttached) > 0 ? 3000 : 0 });
+        };
+
+        const result = await Promise.race([work(), abortPromise]);
         console.log("[ChatGPT Image Auto] image found:", result.imageUrl);
         chrome.runtime.sendMessage({
           type: "PROMPT_RESULT",
@@ -231,13 +319,22 @@ if (!window.__chatgptImageAutoLoaded) {
           sourceUrl: result.sourceUrl,
         }).catch(() => {});
       } catch (err) {
+        if (err.isAborted) {
+          console.log("[ChatGPT Image Auto] operation aborted by user");
+          return; // background already reset the item — don't send PROMPT_RESULT
+        }
         console.error("[ChatGPT Image Auto] error:", err);
         chrome.runtime.sendMessage({
           type: "PROMPT_RESULT",
           requestId: msg.requestId,
           ok: false,
           error: String(err.message || err),
+          isRateLimit: !!err.isRateLimit,
+          waitMs: err.waitMs || 0,
+          isRefusal: !!err.isRefusal,
         }).catch(() => {});
+      } finally {
+        currentAbort = null;
       }
     })();
 

@@ -7,16 +7,25 @@ const DEFAULT_STATE = {
   items: [], // { id, prompt, status: 'waiting'|'generating'|'done'|'error', imageUrl, filename, error, refImageDataUrl }
   running: false,
   aspectRatio: null, // e.g. "1:1" | "16:9" | "9:16" | null
-  masterRefImages: [], // up to 4 reference images (data URLs) applied to every prompt in the queue
+  charRefImages: [],  // up to 2 character reference images (data URLs)
+  styleRefImages: [], // up to 2 style reference images (data URLs)
   theme: "", // subfolder name under baseFolder, e.g. "Kucing"
   autoDownload: true,
   baseFolder: "ChatGPT Image Auto",
+  negativePrompt: "",
+  rateLimitRetryAt: null, // epoch ms — set when rate-limited, cleared on resume
 };
 
-const MAX_MASTER_REF_IMAGES = 4;
 
 let state = { ...DEFAULT_STATE };
 let processing = false;
+
+function abortAllPending() {
+  for (const pending of pendingPromptResults.values()) {
+    pending.reject(Object.assign(new Error("Aborted"), { isAborted: true }));
+  }
+  pendingPromptResults.clear();
+}
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
@@ -71,8 +80,13 @@ async function findOrCreateChatGptTab() {
   let tab = tabs[0];
   if (!tab) {
     tab = await chrome.tabs.create({ url: "https://chatgpt.com/", active: false });
-    await waitForTabComplete(tab.id);
+  } else {
+    // Always navigate to a fresh new chat so prior conversation context
+    // (e.g. the user asking ChatGPT to "generate prompts") does not bleed
+    // into the extension's image-generation request.
+    await chrome.tabs.update(tab.id, { url: "https://chatgpt.com/" });
   }
+  await waitForTabComplete(tab.id);
   // Prevent Chrome's memory saver from discarding this tab while it sits in
   // the background during a multi-minute generate — a discard kills the
   // content script mid-wait and surfaces as "message port closed" errors.
@@ -217,7 +231,9 @@ async function processQueue() {
           type: "PROCESS_PROMPT",
           prompt: next.prompt,
           aspectRatio: state.aspectRatio,
-          refImageDataUrls: state.masterRefImages,
+          charRefDataUrls: state.charRefImages || [],
+          styleRefDataUrls: state.styleRefImages || [],
+          negativePrompt: state.negativePrompt || "",
         });
 
         if (!result || !result.ok) {
@@ -231,6 +247,23 @@ async function processQueue() {
         next.filename = dl.filename || null;
         next.skippedDuplicate = !!dl.skipped;
       } catch (err) {
+        if (err.isAborted || (!state.running && next.status === "waiting")) {
+          // Stopped by user — item already reset to waiting, just exit the loop
+          break;
+        }
+        if (err.isRateLimit) {
+          // Reset item to waiting; pause the queue; schedule resume via Chrome Alarm
+          // (Alarms survive service-worker eviction, unlike setTimeout).
+          next.status = "waiting";
+          const waitMs = err.waitMs || 3600000;
+          state.running = false;
+          state.rateLimitRetryAt = Date.now() + waitMs;
+          await saveState();
+          const delayMinutes = Math.max(1, Math.ceil(waitMs / 60000));
+          chrome.alarms.create("rateLimitResume", { delayInMinutes: delayMinutes });
+          console.log(`[ChatGPT Image Auto] Rate limit hit. Resuming in ${delayMinutes} min.`);
+          break;
+        }
         next.status = "error";
         next.error = String(err.message || err);
       }
@@ -251,7 +284,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (msg.ok) {
         pending.resolve({ ok: true, imageUrl: msg.imageUrl, sourceUrl: msg.sourceUrl });
       } else {
-        pending.reject(new Error(msg.error || "Unknown content-script error"));
+        const err = new Error(msg.error || "Unknown content-script error");
+        if (msg.isRateLimit) {
+          err.isRateLimit = true;
+          err.waitMs = msg.waitMs || 3600000;
+        }
+        if (msg.isRefusal) err.isRefusal = true;
+        pending.reject(err);
       }
     }
     return false;
@@ -295,20 +334,50 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       case "STOP":
         state.running = false;
+        // Reset any in-progress item back to waiting so it can be retried
+        state.items.forEach((i) => {
+          if (i.status === "generating") i.status = "waiting";
+        });
         await saveState();
+        // Abort the pending content-script promise so it doesn't linger 180 s
+        abortAllPending();
+        // Tell the content script to stop waiting for the current generation
+        chrome.tabs.query({ url: "https://chatgpt.com/*" }, (tabs) => {
+          if (tabs[0]) chrome.tabs.sendMessage(tabs[0].id, { type: "ABORT_CURRENT" }).catch(() => {});
+        });
         sendResponse({ ok: true });
         break;
 
-      case "ADD_MASTER_REF_IMAGE":
-        if (state.masterRefImages.length < MAX_MASTER_REF_IMAGES) {
-          state.masterRefImages.push(msg.dataUrl);
+      case "ADD_CHAR_REF_IMAGE":
+        if ((state.charRefImages || []).length < 2) {
+          state.charRefImages = [...(state.charRefImages || []), msg.dataUrl];
         }
         await saveState();
         sendResponse({ ok: true });
         break;
 
-      case "REMOVE_MASTER_REF_IMAGE":
-        state.masterRefImages.splice(msg.index, 1);
+      case "REMOVE_CHAR_REF_IMAGE":
+        state.charRefImages = (state.charRefImages || []).filter((_, i) => i !== msg.index);
+        await saveState();
+        sendResponse({ ok: true });
+        break;
+
+      case "ADD_STYLE_REF_IMAGE":
+        if ((state.styleRefImages || []).length < 2) {
+          state.styleRefImages = [...(state.styleRefImages || []), msg.dataUrl];
+        }
+        await saveState();
+        sendResponse({ ok: true });
+        break;
+
+      case "REMOVE_STYLE_REF_IMAGE":
+        state.styleRefImages = (state.styleRefImages || []).filter((_, i) => i !== msg.index);
+        await saveState();
+        sendResponse({ ok: true });
+        break;
+
+      case "SET_NEGATIVE_PROMPT":
+        state.negativePrompt = msg.negativePrompt || "";
         await saveState();
         sendResponse({ ok: true });
         break;
@@ -384,6 +453,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
   })();
   return true; // keep the message channel open for async sendResponse
+});
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name !== "rateLimitResume") return;
+  await loadState();
+  state.rateLimitRetryAt = null;
+  if (state.items.some((i) => i.status === "waiting")) {
+    state.running = true;
+    await saveState();
+    processQueue();
+  } else {
+    await saveState();
+  }
 });
 
 loadState();
